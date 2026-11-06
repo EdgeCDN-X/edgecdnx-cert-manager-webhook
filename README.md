@@ -62,12 +62,15 @@ All issuers sharing a deployment use the same key; use separate deployments
 and distinct API groups for separately credentialed Projects.
 
 `EDGECDNX_PROJECT_ID` is the only solver setting, configured by
-`edgecdnx.projectID` in Helm. At startup the webhook fetches this Project's zones
-from the API. Startup fails if discovery fails, no zones exist, or the API
-returns invalid/duplicate zones. Challenges are matched by their resolved DNS
+`edgecdnx.projectID` in Helm. Every Present and CleanUp request fetches this
+Project's zones from the API before accessing DNS records. The request fails
+if discovery fails, no zones exist, or the API returns invalid/duplicate zones.
+Challenges are matched by their resolved DNS
 name against the most specific covering zone, using DNS label boundaries.
-The zone snapshot is immutable; restart the deployment after adding, removing,
-or changing zones. New TXT records use a fixed TTL of 60 seconds.
+Zone lists are request-local, not cached, so API zone changes are picked up on
+the next request without restarting the webhook. The API's zone list is
+eventually consistent, so changes may still take time to appear there.
+New TXT records use a fixed TTL of 60 seconds.
 
 ## Issuer
 

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
 	"github.com/miekg/dns"
@@ -20,10 +21,13 @@ import (
 
 type testAPI struct {
 	sync.Mutex
-	record    *apiRecord
-	version   int
-	conflict  bool
-	zoneReads int
+	record         *apiRecord
+	version        int
+	conflict       bool
+	zoneReads      int
+	zoneBody       string
+	zoneStatus     int
+	recordRequests int
 }
 
 func (a *testAPI) serve(w http.ResponseWriter, r *http.Request) {
@@ -37,10 +41,18 @@ func (a *testAPI) serve(w http.ResponseWriter, r *http.Request) {
 	base := "/project/project-a/zones"
 	if r.URL.Path == base && r.Method == http.MethodGet {
 		a.zoneReads++
+		if a.zoneStatus != 0 {
+			w.WriteHeader(a.zoneStatus)
+		}
+		if a.zoneBody != "" {
+			fmt.Fprint(w, a.zoneBody)
+			return
+		}
 		fmt.Fprint(w, `[{"metadata":{"name":"zone-id"},"spec":{"zone":"example.com"}}]`)
 		return
 	}
 	collection := base + "/zone-id/dns-endpoints"
+	a.recordRequests++
 	if r.URL.Path != collection && !strings.HasPrefix(r.URL.Path, collection+"/") {
 		w.WriteHeader(http.StatusNotFound)
 		return
@@ -157,8 +169,45 @@ func TestSolverLifecycle(t *testing.T) {
 	if state.record != nil {
 		t.Fatal("last TXT value was not deleted")
 	}
-	if state.zoneReads != 1 {
-		t.Fatalf("zones fetched %d times; expected startup only", state.zoneReads)
+	if state.zoneReads != 8 {
+		t.Fatalf("zones fetched %d times; expected once for each of 8 requests", state.zoneReads)
+	}
+}
+
+func TestSolverRefreshesZonesOnEachRequest(t *testing.T) {
+	solver, state := testSolver(t)
+	if state.zoneReads != 0 {
+		t.Fatal("Initialize fetched zones")
+	}
+	ch := challenge("refresh")
+	ch.ResolvedFQDN = "_acme-challenge.new.example.net."
+	if err := solver.Present(ch); err == nil {
+		t.Fatal("accepted challenge before its zone was added")
+	}
+	state.zoneBody = `[{"metadata":{"name":"zone-id"},"spec":{"zone":"example.net"}}]`
+	if err := solver.Present(ch); err != nil {
+		t.Fatalf("did not discover newly added zone: %v", err)
+	}
+	requests := state.recordRequests
+	state.zoneBody = `[]`
+	if err := solver.CleanUp(ch); err == nil {
+		t.Fatal("cleanup used stale zone after removal")
+	}
+	state.zoneBody = `{"error":"unavailable"}`
+	state.zoneStatus = http.StatusServiceUnavailable
+	if err := solver.Present(ch); !hasStatus(err, http.StatusServiceUnavailable) {
+		t.Fatalf("discovery failure not surfaced: %v", err)
+	}
+	if state.recordRequests != requests {
+		t.Fatal("accessed records despite failed discovery")
+	}
+	state.zoneStatus = 0
+	state.zoneBody = `[{"metadata":{"name":"zone-id"},"spec":{"zone":"example.net"}}]`
+	if err := solver.CleanUp(ch); err != nil {
+		t.Fatalf("cleanup did not recover after restoring zone: %v", err)
+	}
+	if state.record != nil || state.zoneReads != 5 {
+		t.Fatalf("unexpected refresh lifecycle: record=%+v, zone reads=%d", state.record, state.zoneReads)
 	}
 }
 
@@ -236,26 +285,25 @@ func TestZoneMatching(t *testing.T) {
 	]`), &zones); err != nil {
 		t.Fatal(err)
 	}
-	solver.zones = zones
 	for _, test := range []struct{ name, id string }{
 		{"_acme-challenge.example.com.", "parent"},
 		{"_acme-challenge.SUB.EXAMPLE.COM.", "child"},
 		{"sub.example.com", "child"},
 		{"validation.example.net", "other"},
 	} {
-		zone, err := solver.matchZone(test.name)
+		zone, err := matchZone(zones, test.name, solver.projectID)
 		if err != nil || zone.Metadata.Name != test.id {
 			t.Fatalf("match %s: got %s, %v", test.name, zone.Metadata.Name, err)
 		}
 	}
 	for _, name := range []string{"badexample.com", "example.com.attacker.net"} {
-		if _, err := solver.matchZone(name); err == nil {
+		if _, err := matchZone(zones, name, solver.projectID); err == nil {
 			t.Fatalf("accepted unrelated name %s", name)
 		}
 	}
 }
 
-func TestStartupZoneDiscovery(t *testing.T) {
+func TestRequestZoneDiscovery(t *testing.T) {
 	t.Setenv("EDGECDNX_PROJECT_ID", "project-a")
 	t.Setenv("EDGECDNX_API_KEY", "test-key")
 	for _, test := range []struct {
@@ -283,10 +331,14 @@ func TestStartupZoneDiscovery(t *testing.T) {
 			t.Setenv("EDGECDNX_API_URL", server.URL)
 			solver := &edgeCDNXProviderSolver{}
 			err := solver.Initialize(nil, nil)
-			if (err == nil) != test.success {
-				t.Fatalf("Initialize returned %v, success expected %v", err, test.success)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if test.success && solver.zones[0].Spec.Zone != "example.com" {
+			zones, err := solver.fetchZones(context.Background())
+			if (err == nil) != test.success {
+				t.Fatalf("fetchZones returned %v, success expected %v", err, test.success)
+			}
+			if test.success && zones[0].Spec.Zone != "example.com" {
 				t.Fatal("zone was not normalized")
 			}
 		})
@@ -395,8 +447,14 @@ func TestLiveAPI(t *testing.T) {
 }
 
 func liveTestZone(solver *edgeCDNXProviderSolver, requested string) (string, error) {
+	ctx, cancel := context.WithTimeout(solver.ctx, 30*time.Second)
+	defer cancel()
+	zones, err := solver.fetchZones(ctx)
+	if err != nil {
+		return "", err
+	}
 	if requested != "" {
-		zone, err := solver.matchZone(requested)
+		zone, err := matchZone(zones, requested, solver.projectID)
 		if err != nil {
 			return "", err
 		}
@@ -405,8 +463,8 @@ func liveTestZone(solver *edgeCDNXProviderSolver, requested string) (string, err
 		}
 		return zone.Spec.Zone, nil
 	}
-	names := make([]string, 0, len(solver.zones))
-	for _, zone := range solver.zones {
+	names := make([]string, 0, len(zones))
+	for _, zone := range zones {
 		names = append(names, zone.Spec.Zone)
 	}
 	if len(names) == 0 {

@@ -33,7 +33,6 @@ type edgeCDNXProviderSolver struct {
 	api       *apiClient
 	ctx       context.Context
 	projectID string
-	zones     []apiZone
 }
 
 var _ webhook.Solver = (*edgeCDNXProviderSolver)(nil)
@@ -49,28 +48,7 @@ func (s *edgeCDNXProviderSolver) Initialize(_ *rest.Config, stopCh <-chan struct
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	var zones []apiZone
-	if err := api.request(ctx, http.MethodGet, "/project/"+url.PathEscape(projectID)+"/zones", nil, &zones); err != nil {
-		return fmt.Errorf("fetch Project zones at startup: %w", err)
-	}
-	if len(zones) == 0 {
-		return fmt.Errorf("Project %q has no available zones", projectID)
-	}
-	seen := make(map[string]bool, len(zones))
-	for i := range zones {
-		name := normalizeDNSName(zones[i].Spec.Zone)
-		if !validResourceID(zones[i].Metadata.Name) || len(validation.IsDNS1123Subdomain(name)) != 0 {
-			return errors.New("API returned an invalid zone name or ID")
-		}
-		if seen[name] {
-			return fmt.Errorf("API returned duplicate DNS zone %q", name)
-		}
-		seen[name] = true
-		zones[i].Spec.Zone = name
-	}
-	s.api, s.projectID, s.zones = api, projectID, zones
+	s.api, s.projectID = api, projectID
 	s.ctx = context.Background()
 	if stopCh != nil {
 		ctx, cancel := context.WithCancel(s.ctx)
@@ -120,12 +98,16 @@ func (s *edgeCDNXProviderSolver) change(ch *v1alpha1.ChallengeRequest, present b
 	if _, ok := dns.IsDomainName(name); !ok || name == "" {
 		return errors.New("challenge must have a valid resolved DNS name")
 	}
-	zone, err := s.matchZone(name)
+	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
+	defer cancel()
+	zones, err := s.fetchZones(ctx)
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
-	defer cancel()
+	zone, err := matchZone(zones, name, s.projectID)
+	if err != nil {
+		return err
+	}
 	path := "/project/" + url.PathEscape(s.projectID) + "/zones/" + url.PathEscape(zone.Metadata.Name) + "/dns-endpoints"
 	recordPath := path + "/" + recordResourceName(name)
 	for attempt := 0; attempt < 6; attempt++ {
@@ -147,16 +129,39 @@ func (s *edgeCDNXProviderSolver) change(ch *v1alpha1.ChallengeRequest, present b
 	return fmt.Errorf("DNS endpoint changed during all retry attempts: %w", err)
 }
 
-func (s *edgeCDNXProviderSolver) matchZone(name string) (apiZone, error) {
+func (s *edgeCDNXProviderSolver) fetchZones(ctx context.Context) ([]apiZone, error) {
+	var zones []apiZone
+	if err := s.api.request(ctx, http.MethodGet, "/project/"+url.PathEscape(s.projectID)+"/zones", nil, &zones); err != nil {
+		return nil, fmt.Errorf("fetch Project zones: %w", err)
+	}
+	if len(zones) == 0 {
+		return nil, fmt.Errorf("Project %q has no available zones", s.projectID)
+	}
+	seen := make(map[string]bool, len(zones))
+	for i := range zones {
+		name := normalizeDNSName(zones[i].Spec.Zone)
+		if !validResourceID(zones[i].Metadata.Name) || len(validation.IsDNS1123Subdomain(name)) != 0 {
+			return nil, errors.New("API returned an invalid zone name or ID")
+		}
+		if seen[name] {
+			return nil, fmt.Errorf("API returned duplicate DNS zone %q", name)
+		}
+		seen[name] = true
+		zones[i].Spec.Zone = name
+	}
+	return zones, nil
+}
+
+func matchZone(zones []apiZone, name, projectID string) (apiZone, error) {
 	name = normalizeDNSName(name)
 	var best apiZone
-	for _, zone := range s.zones {
+	for _, zone := range zones {
 		if (name == zone.Spec.Zone || strings.HasSuffix(name, "."+zone.Spec.Zone)) && len(zone.Spec.Zone) > len(best.Spec.Zone) {
 			best = zone
 		}
 	}
 	if best.Metadata.Name == "" {
-		return best, fmt.Errorf("no available zone covers %q in Project %q", name, s.projectID)
+		return best, fmt.Errorf("no available zone covers %q in Project %q", name, projectID)
 	}
 	return best, nil
 }
