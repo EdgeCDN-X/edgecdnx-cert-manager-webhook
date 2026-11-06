@@ -19,3 +19,5 @@ cert-manager-webhook-example
 bin
 _out
 _test
+
+.envrc

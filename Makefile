@@ -12,11 +12,8 @@ ENVTEST_K8S_VERSION=1.35.0
 
 HELM_FILES := $(shell find deploy/example-webhook)
 
-# FIXME: The environment variables are required by the test helper in cert-manager, but not required to run the tests.
-test: setup-envtest
-	TEST_ASSET_ETCD=$(LOCALBIN)/k8s/$(ENVTEST_K8S_VERSION)-$(OS)-$(ARCH)/etcd \
-	TEST_ASSET_KUBE_APISERVER=$(LOCALBIN)/k8s/$(ENVTEST_K8S_VERSION)-$(OS)-$(ARCH)/kube-apiserver \
-	TEST_ASSET_KUBECTL=$(LOCALBIN)/k8s/$(ENVTEST_K8S_VERSION)-$(OS)-$(ARCH)/kubectl \
+.PHONY: test
+test:
 	$(GO) test -v .
 
 .PHONY: clean
@@ -32,10 +29,11 @@ build:
 rendered-manifest.yaml: $(OUT)/rendered-manifest.yaml
 
 $(OUT)/rendered-manifest.yaml: $(HELM_FILES) | $(OUT)
-	helm template \
-	    --name example-webhook \
+	@test -n "$(EDGECDNX_PROJECT_ID)" || { echo "EDGECDNX_PROJECT_ID is required" >&2; exit 1; }
+	helm template edgecdnx-webhook \
             --set image.repository=$(IMAGE_NAME) \
             --set image.tag=$(IMAGE_TAG) \
+            --set-string edgecdnx.projectID="$(EDGECDNX_PROJECT_ID)" \
             deploy/example-webhook > $@
 
 ## Location to install dependencies to

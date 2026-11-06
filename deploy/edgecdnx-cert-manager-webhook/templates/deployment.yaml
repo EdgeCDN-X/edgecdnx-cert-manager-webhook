@@ -31,6 +31,15 @@ spec:
           env:
             - name: GROUP_NAME
               value: {{ .Values.groupName | quote }}
+            - name: EDGECDNX_API_URL
+              value: {{ required "edgecdnx.apiURL is required" .Values.edgecdnx.apiURL | quote }}
+            - name: EDGECDNX_PROJECT_ID
+              value: {{ required "edgecdnx.projectID is required" .Values.edgecdnx.projectID | quote }}
+            - name: EDGECDNX_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "edgecdnx.apiKeySecretRef.name is required" .Values.edgecdnx.apiKeySecretRef.name | quote }}
+                  key: {{ required "edgecdnx.apiKeySecretRef.key is required" .Values.edgecdnx.apiKeySecretRef.key | quote }}
           ports:
             - name: https
               containerPort: 443

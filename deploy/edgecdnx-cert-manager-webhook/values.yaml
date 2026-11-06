@@ -8,14 +8,23 @@
 # The name will need to be referenced in each Issuer's `webhook` stanza to
 # inform cert-manager of where to send ChallengePayload resources in order to
 # solve the DNS01 challenge.
-groupName: acme.mycompany.com
+groupName: acme.edgecdnx.com
+
+replicaCount: 1
+
+edgecdnx:
+  projectID: ""
+  apiURL: https://api.edgecdnx.com
+  apiKeySecretRef:
+    name: edgecdnx-api-key
+    key: api-key
 
 certManager:
   namespace: cert-manager
   serviceAccountName: cert-manager
 
 image:
-  repository: mycompany/webhook-image
+  repository: ghcr.io/edgecdn-x/edgecdnx-cert-manager-webhook
   tag: latest
   pullPolicy: IfNotPresent
 
