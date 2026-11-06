@@ -3,7 +3,7 @@ name: Build and Push Docker Image
 on:
   push:
     branches:
-      - master
+      - main
     tags:
       - 'v*'
 
@@ -67,7 +67,7 @@ jobs:
           docker manifest push fr6nco/edgecdnx-cert-manager-webhook:${{ github.ref_name }}
 
       - name: Push :latest manifest
-        if: ${{ github.ref_name == 'master' || github.ref_name == 'refs/heads/master' }} # Ensure this matches the branch name for the latest tag
+        if: ${{ github.ref_name == 'main' || github.ref_name == 'refs/heads/main' }} # Ensure this matches the branch name for the latest tag
         run: |
           docker manifest create fr6nco/edgecdnx-cert-manager-webhook:latest \
             --amend fr6nco/edgecdnx-cert-manager-webhook:amd64-${{ github.ref_name }} \
