@@ -12,6 +12,10 @@ groupName: acme.edgecdnx.com
 
 replicaCount: 1
 
+# Log verbosity (klog --v). Set to 4 or higher to log incoming challenges and
+# EdgeCDN-X API requests/responses. API keys are never logged at any level.
+logLevel: 2
+
 edgecdnx:
   projectID: ""
   apiURL: https://api.edgecdnx.com

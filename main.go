@@ -18,6 +18,7 @@ import (
 	"github.com/miekg/dns"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/rest"
+	"k8s.io/klog/v2"
 )
 
 var GroupName = os.Getenv("GROUP_NAME")
@@ -79,12 +80,20 @@ func normalizeDNSName(name string) string {
 }
 
 func (s *edgeCDNXProviderSolver) change(ch *v1alpha1.ChallengeRequest, present bool) error {
+	action := "CleanUp"
+	if present {
+		action = "Present"
+	}
 	if s.api == nil || s.ctx == nil {
 		return errors.New("EdgeCDN-X solver is not initialized")
 	}
 	if ch == nil || ch.Key == "" {
 		return errors.New("challenge and TXT value are required")
 	}
+	// The TXT value (ch.Key) is public DNS data; the API key is never part of a challenge.
+	klog.V(4).InfoS("EdgeCDN-X solver received challenge", "action", action,
+		"fqdn", ch.ResolvedFQDN, "zone", ch.ResolvedZone, "dnsName", ch.DNSName,
+		"type", ch.Type, "resourceNamespace", ch.ResourceNamespace)
 	if ch.Config != nil && len(ch.Config.Raw) != 0 {
 		var config map[string]json.RawMessage
 		if err := json.Unmarshal(ch.Config.Raw, &config); err != nil {
@@ -110,9 +119,14 @@ func (s *edgeCDNXProviderSolver) change(ch *v1alpha1.ChallengeRequest, present b
 	}
 	path := "/project/" + url.PathEscape(s.projectID) + "/zones/" + url.PathEscape(zone.Metadata.Name) + "/dns-endpoints"
 	recordPath := path + "/" + recordResourceName(name)
+	klog.V(4).InfoS("EdgeCDN-X solver matched zone", "action", action, "fqdn", name,
+		"zoneID", zone.Metadata.Name, "zone", zone.Spec.Zone, "recordPath", recordPath)
 	for attempt := 0; attempt < 6; attempt++ {
 		err = s.changeRecord(ctx, path, recordPath, name, ch.Key, 60, present)
 		if !hasStatus(err, http.StatusConflict) && !hasStatus(err, http.StatusNotFound) {
+			if err == nil {
+				klog.V(4).InfoS("EdgeCDN-X solver completed challenge", "action", action, "fqdn", name)
+			}
 			return err
 		}
 

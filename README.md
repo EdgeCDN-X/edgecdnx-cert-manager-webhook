@@ -61,6 +61,16 @@ After Secret rotation, restart the deployment to refresh its environment.
 All issuers sharing a deployment use the same key; use separate deployments
 and distinct API groups for separately credentialed Projects.
 
+## Debug logging
+
+Set `logLevel: 4` (klog `--v=4`) in Helm values to log incoming Present/CleanUp
+challenges, the matched zone, and every EdgeCDN-X API request and response,
+including request/response bodies, HTTP status and duration. The API key is
+never logged: the `Authorization` header is never printed, and any logged
+request or response text has occurrences of the key redacted. TXT challenge
+values appear in debug logs; they are public DNS data, not credentials. The
+default `logLevel: 2` keeps this debug output disabled.
+
 `EDGECDNX_PROJECT_ID` is the only solver setting, configured by
 `edgecdnx.projectID` in Helm. Every Present and CleanUp request fetches this
 Project's zones from the API before accessing DNS records. The request fails

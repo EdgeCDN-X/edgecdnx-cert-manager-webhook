@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"k8s.io/klog/v2"
 )
 
 type apiClient struct {
@@ -79,31 +81,56 @@ func newAPIClient(baseURL, key string) (*apiClient, error) {
 	}, nil
 }
 
+// redact masks the API key anywhere it might appear in text destined for logs.
+func (a *apiClient) redact(s string) string {
+	return strings.ReplaceAll(s, a.key, "[REDACTED]")
+}
+
 func (a *apiClient) request(ctx context.Context, method, path string, payload, result interface{}) error {
 	var body io.Reader
+	var requestBody []byte
 	if payload != nil {
 		data, err := json.Marshal(payload)
 		if err != nil {
 			return fmt.Errorf("encode API request: %w", err)
 		}
+		requestBody = data
 		body = bytes.NewReader(data)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, a.baseURL+path, body)
+	requestURL := a.baseURL + path
+	req, err := http.NewRequestWithContext(ctx, method, requestURL, body)
 	if err != nil {
 		return fmt.Errorf("create API request: %w", err)
 	}
+	// Never log request headers: Authorization carries the API key.
 	req.Header.Set("Authorization", "ApiKey "+a.key)
 	req.Header.Set("Accept", "application/json")
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	debug := klog.V(4)
+	if debug.Enabled() {
+		debug.InfoS("EdgeCDN-X API request", "method", method, "url", requestURL,
+			"body", a.redact(string(requestBody)))
+	}
+	start := time.Now()
 	resp, err := a.http.Do(req)
 	if err != nil {
+		if debug.Enabled() {
+			debug.InfoS("EdgeCDN-X API request failed", "method", method, "url", requestURL,
+				"duration", time.Since(start), "error", a.redact(err.Error()))
+		}
 		return fmt.Errorf("call EdgeCDN-X API: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// Do not include response bodies: proxies or servers may echo credentials.
+		if debug.Enabled() {
+			// Read a bounded body for debug logging only; returned errors never
+			// include bodies, which proxies or servers may echo (keys are redacted here).
+			data, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+			debug.InfoS("EdgeCDN-X API response", "method", method, "url", requestURL,
+				"status", resp.StatusCode, "duration", time.Since(start), "body", a.redact(string(data)))
+		}
 		return &apiError{method: method, status: resp.StatusCode}
 	}
 	if result != nil {
@@ -114,9 +141,19 @@ func (a *apiClient) request(ctx context.Context, method, path string, payload, r
 		if len(data) > 1<<20 {
 			return errors.New("API response exceeds 1 MiB")
 		}
+		if debug.Enabled() {
+			debug.InfoS("EdgeCDN-X API response", "method", method, "url", requestURL,
+				"status", resp.StatusCode, "duration", time.Since(start), "body", a.redact(string(data)))
+		}
 		if err := json.Unmarshal(data, result); err != nil {
 			return fmt.Errorf("decode API response: %w", err)
 		}
+		return nil
+	}
+	if debug.Enabled() {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		debug.InfoS("EdgeCDN-X API response", "method", method, "url", requestURL,
+			"status", resp.StatusCode, "duration", time.Since(start), "body", a.redact(string(data)))
 	}
 	return nil
 }
