@@ -1,7 +1,7 @@
 cel.dev/expr v0.25.2 h1:K6j46C81hXtZQfuX60cVWQFBJahKSE2gfRbNuvr5bFs=
 cel.dev/expr v0.25.2/go.mod h1:hrXvqGP6G6gyx8UAHSHJ5RGk//1Oj5nXQ2NI02Nrsg4=
-github.com/EdgeCDN-X/edgecdnx-controller v1.2.0 h1:EkIm8UzOy9ZQWDi4GcvV229BjUQpjD0ps5jOSANp3vg=
-github.com/EdgeCDN-X/edgecdnx-controller v1.2.0/go.mod h1:HDsRz/OBRz2Zt/D80aM55kFbDZp/8zinQon/Wdj/sGc=
+github.com/EdgeCDN-X/edgecdnx-controller v1.2.1 h1:pwODDYJP8wS/HujsWi2p+QcoYzOdwlZUJcKRfYmpYMo=
+github.com/EdgeCDN-X/edgecdnx-controller v1.2.1/go.mod h1:HDsRz/OBRz2Zt/D80aM55kFbDZp/8zinQon/Wdj/sGc=
 github.com/EdgeCDN-X/edgecdnx-sdk-go v0.1.1 h1:jkZ1JZ2h3honOfjz+i+rkzJFBIvMGuMmIQDx1ALM6e8=
 github.com/EdgeCDN-X/edgecdnx-sdk-go v0.1.1/go.mod h1:RkK/PTNzUBFWA3jNegU5I9YXIsBizVctmHlwVNaJJ34=
 github.com/Masterminds/semver/v3 v3.4.0 h1:Zog+i5UMtVoCU8oKka5P7i9q9HgrJeGzI9SA1Xbatp0=

@@ -1,9 +1,9 @@
-module github.com/cert-manager/webhook-example
+module github.com/EdgeCDN-X/edgecdnx-cert-manager-webhook
 
 go 1.26.0
 
 require (
-	github.com/EdgeCDN-X/edgecdnx-controller v1.2.0
+	github.com/EdgeCDN-X/edgecdnx-controller v1.2.1
 	github.com/EdgeCDN-X/edgecdnx-sdk-go v0.1.1
 	github.com/cert-manager/cert-manager v1.21.3
 	github.com/miekg/dns v1.1.73
