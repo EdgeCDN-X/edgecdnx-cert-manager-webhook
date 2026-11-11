@@ -7,11 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"time"
 
+	infrastructurev1alpha1 "github.com/EdgeCDN-X/edgecdnx-controller/api/v1alpha1"
+	edgecdnx "github.com/EdgeCDN-X/edgecdnx-sdk-go"
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook"
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/cmd"
@@ -117,12 +118,11 @@ func (s *edgeCDNXProviderSolver) change(ch *v1alpha1.ChallengeRequest, present b
 	if err != nil {
 		return err
 	}
-	path := "/project/" + url.PathEscape(s.projectID) + "/zones/" + url.PathEscape(zone.Metadata.Name) + "/dns-endpoints"
-	recordPath := path + "/" + recordResourceName(name)
+	recordID := recordResourceName(name)
 	klog.V(4).InfoS("EdgeCDN-X solver matched zone", "action", action, "fqdn", name,
-		"zoneID", zone.Metadata.Name, "zone", zone.Spec.Zone, "recordPath", recordPath)
+		"zoneID", zone.Name, "zone", zone.Spec.Zone, "recordID", recordID)
 	for attempt := 0; attempt < 6; attempt++ {
-		err = s.changeRecord(ctx, path, recordPath, name, ch.Key, 60, present)
+		err = s.changeRecord(ctx, zone.Name, recordID, name, ch.Key, 60, present)
 		if !hasStatus(err, http.StatusConflict) && !hasStatus(err, http.StatusNotFound) {
 			if err == nil {
 				klog.V(4).InfoS("EdgeCDN-X solver completed challenge", "action", action, "fqdn", name)
@@ -143,10 +143,10 @@ func (s *edgeCDNXProviderSolver) change(ch *v1alpha1.ChallengeRequest, present b
 	return fmt.Errorf("DNS endpoint changed during all retry attempts: %w", err)
 }
 
-func (s *edgeCDNXProviderSolver) fetchZones(ctx context.Context) ([]apiZone, error) {
-	var zones []apiZone
-	if err := s.api.request(ctx, http.MethodGet, "/project/"+url.PathEscape(s.projectID)+"/zones", nil, &zones); err != nil {
-		return nil, fmt.Errorf("fetch Project zones: %w", err)
+func (s *edgeCDNXProviderSolver) fetchZones(ctx context.Context) ([]infrastructurev1alpha1.Zone, error) {
+	zones, err := s.api.Zones.List(ctx, s.projectID)
+	if err != nil {
+		return nil, fmt.Errorf("fetch Project zones: %w", s.api.safeError(err))
 	}
 	if len(zones) == 0 {
 		return nil, fmt.Errorf("Project %q has no available zones", s.projectID)
@@ -154,7 +154,7 @@ func (s *edgeCDNXProviderSolver) fetchZones(ctx context.Context) ([]apiZone, err
 	seen := make(map[string]bool, len(zones))
 	for i := range zones {
 		name := normalizeDNSName(zones[i].Spec.Zone)
-		if !validResourceID(zones[i].Metadata.Name) || len(validation.IsDNS1123Subdomain(name)) != 0 {
+		if !validResourceID(zones[i].Name) || len(validation.IsDNS1123Subdomain(name)) != 0 {
 			return nil, errors.New("API returned an invalid zone name or ID")
 		}
 		if seen[name] {
@@ -166,15 +166,15 @@ func (s *edgeCDNXProviderSolver) fetchZones(ctx context.Context) ([]apiZone, err
 	return zones, nil
 }
 
-func matchZone(zones []apiZone, name, projectID string) (apiZone, error) {
+func matchZone(zones []infrastructurev1alpha1.Zone, name, projectID string) (infrastructurev1alpha1.Zone, error) {
 	name = normalizeDNSName(name)
-	var best apiZone
+	var best infrastructurev1alpha1.Zone
 	for _, zone := range zones {
 		if (name == zone.Spec.Zone || strings.HasSuffix(name, "."+zone.Spec.Zone)) && len(zone.Spec.Zone) > len(best.Spec.Zone) {
 			best = zone
 		}
 	}
-	if best.Metadata.Name == "" {
+	if best.Name == "" {
 		return best, fmt.Errorf("no available zone covers %q in Project %q", name, projectID)
 	}
 	return best, nil
@@ -190,21 +190,22 @@ func recordResourceName(name string) string {
 	return fmt.Sprintf("dnsendpoint-%x", digest[:12])
 }
 
-func (s *edgeCDNXProviderSolver) changeRecord(ctx context.Context, path, recordPath, name, key string, ttl int, present bool) error {
-	var record apiRecord
-	err := s.api.request(ctx, http.MethodGet, recordPath, nil, &record)
+func (s *edgeCDNXProviderSolver) changeRecord(ctx context.Context, zoneID, recordID, name, key string, ttl int, present bool) (err error) {
+	defer func() { err = s.api.safeError(err) }()
+	record, err := s.api.DNSRecords.Get(ctx, s.projectID, zoneID, recordID)
 	if hasStatus(err, http.StatusNotFound) {
 		if !present {
 			return nil
 		}
-		return s.api.request(ctx, http.MethodPost, path, recordSpec{
-			DNSName: name, RecordType: "TXT", RecordTTL: ttl, RoutingPolicy: "Simple", Targets: []string{key},
-		}, nil)
+		_, err := s.api.DNSRecords.Create(ctx, s.projectID, zoneID, edgecdnx.CreateDNSRecordRequest{
+			DNSName: name, RecordType: "TXT", RecordTTL: edgecdnx.Ptr(ttl), RoutingPolicy: "Simple", Targets: []string{key},
+		})
+		return err
 	}
 	if err != nil {
 		return err
 	}
-	if record.Metadata.ResourceVersion == "" || normalizeDNSName(record.Spec.DNSName) != name ||
+	if record.ResourceVersion == "" || normalizeDNSName(record.Spec.DNSName) != name ||
 		record.Spec.RecordType != "TXT" || record.Spec.RoutingPolicy != "Simple" {
 		return errors.New("API returned an incompatible DNS endpoint or missing resourceVersion")
 	}
@@ -226,10 +227,11 @@ func (s *edgeCDNXProviderSolver) changeRecord(ctx context.Context, path, recordP
 		targets = append(targets, key)
 	}
 	if len(targets) == 0 {
-		return s.api.request(ctx, http.MethodDelete, recordPath+"?resourceVersion="+url.QueryEscape(record.Metadata.ResourceVersion), nil, nil)
+		return s.api.DNSRecords.DeleteWithOptions(ctx, s.projectID, zoneID, recordID,
+			edgecdnx.DeleteDNSRecordOptions{ResourceVersion: record.ResourceVersion})
 	}
-	return s.api.request(ctx, http.MethodPatch, recordPath, struct {
-		ResourceVersion string   `json:"resourceVersion"`
-		Targets         []string `json:"targets"`
-	}{record.Metadata.ResourceVersion, targets}, nil)
+	_, err = s.api.DNSRecords.Update(ctx, s.projectID, zoneID, recordID, edgecdnx.UpdateDNSRecordRequest{
+		ResourceVersion: record.ResourceVersion, Targets: targets,
+	})
+	return err
 }

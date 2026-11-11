@@ -3,6 +3,8 @@ module github.com/cert-manager/webhook-example
 go 1.26.0
 
 require (
+	github.com/EdgeCDN-X/edgecdnx-controller v1.2.0
+	github.com/EdgeCDN-X/edgecdnx-sdk-go v0.1.1
 	github.com/cert-manager/cert-manager v1.21.3
 	github.com/miekg/dns v1.1.73
 	k8s.io/apiextensions-apiserver v0.37.2
@@ -47,7 +49,7 @@ require (
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/cel-go v0.30.0 // indirect
 	github.com/google/gnostic-models v0.7.1 // indirect
-	github.com/google/uuid v1.6.0 // indirect
+	github.com/google/uuid v1.6.1-0.20241114170450-2d3c2a9cc518 // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus v1.1.0 // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware/v2 v2.3.3 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 // indirect

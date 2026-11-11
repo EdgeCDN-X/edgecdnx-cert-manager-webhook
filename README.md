@@ -3,6 +3,12 @@
 DNS01 solver for the EdgeCDN-X API. Solver name: `edgecdnx`; default API group:
 `acme.edgecdnx.com`.
 
+Zone discovery and DNS record operations use
+[`edgecdnx-sdk-go`](https://github.com/EdgeCDN-X/edgecdnx-sdk-go) v0.1.1.
+The webhook retains its transport timeout, redirect rejection, response-size
+limit, and redacted debug logging. SDK conditional deletion preserves the
+resource-version preconditions used for concurrent challenge cleanup.
+
 The solver creates Simple TXT DNS endpoints, adds challenge values without
 overwriting existing values, and removes only the completed challenge's value.
 Repeated Present/CleanUp calls are idempotent. Optimistic version checks and

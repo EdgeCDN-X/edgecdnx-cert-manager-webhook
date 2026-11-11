@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,14 +15,16 @@ import (
 	"testing"
 	"time"
 
+	infrastructurev1alpha1 "github.com/EdgeCDN-X/edgecdnx-controller/api/v1alpha1"
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
 	"github.com/miekg/dns"
 	extapi "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 type testAPI struct {
 	sync.Mutex
-	record         *apiRecord
+	record         *infrastructurev1alpha1.DNSEndpoint
 	version        int
 	conflict       bool
 	zoneReads      int
@@ -70,14 +73,15 @@ func (a *testAPI) serve(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusConflict)
 			return
 		}
-		a.record = &apiRecord{}
+		a.record = &infrastructurev1alpha1.DNSEndpoint{}
 		if err := json.NewDecoder(r.Body).Decode(&a.record.Spec); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
 		a.version++
-		a.record.Metadata.ResourceVersion = strconv.Itoa(a.version)
+		a.record.ResourceVersion = strconv.Itoa(a.version)
 		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(a.record)
 		return
 	}
 	if a.record == nil {
@@ -99,10 +103,10 @@ func (a *testAPI) serve(w http.ResponseWriter, r *http.Request) {
 	if a.conflict {
 		a.conflict = false
 		a.version++
-		a.record.Metadata.ResourceVersion = strconv.Itoa(a.version)
+		a.record.ResourceVersion = strconv.Itoa(a.version)
 		a.record.Spec.Targets = append(a.record.Spec.Targets, "other-writer")
 	}
-	if patch.ResourceVersion != a.record.Metadata.ResourceVersion {
+	if patch.ResourceVersion != a.record.ResourceVersion {
 		w.WriteHeader(http.StatusConflict)
 		return
 	}
@@ -110,7 +114,9 @@ func (a *testAPI) serve(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPatch:
 		a.record.Spec.Targets = patch.Targets
 		a.version++
-		a.record.Metadata.ResourceVersion = strconv.Itoa(a.version)
+		a.record.ResourceVersion = strconv.Itoa(a.version)
+		_ = json.NewEncoder(w).Encode(a.record)
+		return
 	case http.MethodDelete:
 		a.record = nil
 	default:
@@ -277,7 +283,7 @@ func TestSolverValidation(t *testing.T) {
 
 func TestZoneMatching(t *testing.T) {
 	solver, _ := testSolver(t)
-	var zones []apiZone
+	var zones []infrastructurev1alpha1.Zone
 	if err := json.Unmarshal([]byte(`[
 		{"metadata":{"name":"parent"},"spec":{"zone":"example.com"}},
 		{"metadata":{"name":"child"},"spec":{"zone":"sub.example.com"}},
@@ -292,8 +298,8 @@ func TestZoneMatching(t *testing.T) {
 		{"validation.example.net", "other"},
 	} {
 		zone, err := matchZone(zones, test.name, solver.projectID)
-		if err != nil || zone.Metadata.Name != test.id {
-			t.Fatalf("match %s: got %s, %v", test.name, zone.Metadata.Name, err)
+		if err != nil || zone.Name != test.id {
+			t.Fatalf("match %s: got %s, %v", test.name, zone.Name, err)
 		}
 	}
 	for _, name := range []string{"badexample.com", "example.com.attacker.net"} {
@@ -392,7 +398,8 @@ func TestAPIErrorsAndRedirects(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = client.request(context.Background(), http.MethodGet, "/test", nil, nil)
+			_, err = client.Zones.List(context.Background(), "project-a")
+			err = client.safeError(err)
 			if !hasStatus(err, status) || strings.Contains(err.Error(), "secret-key") {
 				t.Fatalf("unexpected API error: %v", err)
 			}
@@ -405,6 +412,79 @@ func TestAPIErrorsAndRedirects(t *testing.T) {
 	}
 	if _, err := newAPIClient("https://example.com", ""); err == nil {
 		t.Fatal("accepted missing API key")
+	}
+}
+
+func TestSDKErrorBodiesAreNotReturned(t *testing.T) {
+	for _, body := range []string{
+		`{"error":"server echoed secret-key and private response data"}`,
+		"server echoed secret-key and private response data",
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+			fmt.Fprint(w, body)
+		}))
+		client, err := newAPIClient(server.URL, "secret-key")
+		if err != nil {
+			server.Close()
+			t.Fatal(err)
+		}
+		solver := &edgeCDNXProviderSolver{api: client, projectID: "project-a", ctx: context.Background()}
+		err = solver.Present(challenge("value"))
+		server.Close()
+		if !hasStatus(err, http.StatusForbidden) || strings.Contains(err.Error(), "secret-key") ||
+			strings.Contains(err.Error(), "private response data") {
+			t.Fatalf("unexpected returned error: %v", err)
+		}
+	}
+}
+
+func TestSDKResponseSizeLimit(t *testing.T) {
+	solver, state := testSolver(t)
+	state.zoneBody = strings.Repeat(" ", 1<<20) + `[]`
+	if _, err := solver.fetchZones(context.Background()); err == nil || !strings.Contains(err.Error(), "exceeds 1 MiB") {
+		t.Fatalf("oversized SDK response was not rejected: %v", err)
+	}
+}
+
+func TestSDKContextCancellation(t *testing.T) {
+	solver, state := testSolver(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	solver.ctx = ctx
+	if err := solver.Present(challenge("value")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation, got %v", err)
+	}
+	if state.zoneReads != 0 || state.recordRequests != 0 {
+		t.Fatal("canceled challenge accessed API")
+	}
+}
+
+func TestSolverRejectsIncompatibleSDKRecord(t *testing.T) {
+	for _, test := range []struct {
+		name, version, dnsName, recordType, policy string
+	}{
+		{"missing version", "", "_acme-challenge.example.com", "TXT", "Simple"},
+		{"wrong name", "1", "other.example.com", "TXT", "Simple"},
+		{"wrong type", "1", "_acme-challenge.example.com", "A", "Simple"},
+		{"wrong policy", "1", "_acme-challenge.example.com", "TXT", "Failover"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			solver, state := testSolver(t)
+			state.record = &infrastructurev1alpha1.DNSEndpoint{
+				ObjectMeta: metav1.ObjectMeta{ResourceVersion: test.version},
+				Spec: infrastructurev1alpha1.DNSEndpointSpec{
+					DNSName: test.dnsName, RecordType: test.recordType, RoutingPolicy: test.policy,
+					Targets: []string{"existing"},
+				},
+			}
+			if err := solver.Present(challenge("new")); err == nil {
+				t.Fatal("accepted incompatible record")
+			}
+			if !slices.Equal(state.record.Spec.Targets, []string{"existing"}) || state.recordRequests != 1 {
+				t.Fatal("modified incompatible record")
+			}
+		})
 	}
 }
 
