@@ -17,9 +17,11 @@ import (
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
 	"github.com/cert-manager/cert-manager/pkg/acme/webhook/cmd"
 	"github.com/miekg/dns"
+	"github.com/spf13/pflag"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 var GroupName = os.Getenv("GROUP_NAME")
@@ -28,29 +30,47 @@ func main() {
 	if GroupName == "" {
 		panic("GROUP_NAME must be specified")
 	}
-	cmd.RunWebhookServer(GroupName, &edgeCDNXProviderSolver{})
+	solver := &edgeCDNXProviderSolver{}
+	pflag.StringVar(&solver.mode, "webhook-mode", "API", "DNS backend: API or CRD")
+	cmd.RunWebhookServer(GroupName, solver)
 }
 
 type edgeCDNXProviderSolver struct {
 	api       *apiClient
 	ctx       context.Context
 	projectID string
+	mode      string
+	kube      client.Client
 }
 
 var _ webhook.Solver = (*edgeCDNXProviderSolver)(nil)
 
 func (s *edgeCDNXProviderSolver) Name() string { return "edgecdnx" }
 
-func (s *edgeCDNXProviderSolver) Initialize(_ *rest.Config, stopCh <-chan struct{}) error {
-	projectID := os.Getenv("EDGECDNX_PROJECT_ID")
-	if !validResourceID(projectID) {
-		return errors.New("EDGECDNX_PROJECT_ID must contain a valid Project ID")
+func (s *edgeCDNXProviderSolver) Initialize(config *rest.Config, stopCh <-chan struct{}) error {
+	switch s.mode {
+	case "", "API":
+		projectID := os.Getenv("EDGECDNX_PROJECT_ID")
+		if !validResourceID(projectID) {
+			return errors.New("EDGECDNX_PROJECT_ID must contain a valid Project ID")
+		}
+		api, err := newAPIClient(os.Getenv("EDGECDNX_API_URL"), os.Getenv("EDGECDNX_API_KEY"))
+		if err != nil {
+			return err
+		}
+		s.api, s.projectID = api, projectID
+	case "CRD":
+		if config == nil {
+			return errors.New("Kubernetes configuration is required in CRD mode")
+		}
+		kube, err := newCRDClient(config)
+		if err != nil {
+			return fmt.Errorf("initialize Kubernetes client: %w", err)
+		}
+		s.kube = kube
+	default:
+		return fmt.Errorf("invalid webhook mode %q: expected API or CRD", s.mode)
 	}
-	api, err := newAPIClient(os.Getenv("EDGECDNX_API_URL"), os.Getenv("EDGECDNX_API_KEY"))
-	if err != nil {
-		return err
-	}
-	s.api, s.projectID = api, projectID
 	s.ctx = context.Background()
 	if stopCh != nil {
 		ctx, cancel := context.WithCancel(s.ctx)
@@ -58,7 +78,9 @@ func (s *edgeCDNXProviderSolver) Initialize(_ *rest.Config, stopCh <-chan struct
 		go func() {
 			<-stopCh
 			cancel()
-			api.http.CloseIdleConnections()
+			if s.api != nil {
+				s.api.http.CloseIdleConnections()
+			}
 		}()
 	}
 	return nil
@@ -85,7 +107,7 @@ func (s *edgeCDNXProviderSolver) change(ch *v1alpha1.ChallengeRequest, present b
 	if present {
 		action = "Present"
 	}
-	if s.api == nil || s.ctx == nil {
+	if (s.api == nil && s.kube == nil) || s.ctx == nil {
 		return errors.New("EdgeCDN-X solver is not initialized")
 	}
 	if ch == nil || ch.Key == "" {
@@ -101,6 +123,9 @@ func (s *edgeCDNXProviderSolver) change(ch *v1alpha1.ChallengeRequest, present b
 			return fmt.Errorf("decode Issuer config: %w", err)
 		}
 		if len(config) != 0 {
+			if s.kube != nil {
+				return errors.New("per-Issuer config is not supported in CRD mode")
+			}
 			return errors.New("per-Issuer config is not supported; configure EDGECDNX_PROJECT_ID on the deployment")
 		}
 	}
@@ -110,6 +135,9 @@ func (s *edgeCDNXProviderSolver) change(ch *v1alpha1.ChallengeRequest, present b
 	}
 	ctx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
 	defer cancel()
+	if s.kube != nil {
+		return s.changeCRD(ctx, name, ch.Key, present)
+	}
 	zones, err := s.fetchZones(ctx)
 	if err != nil {
 		return err

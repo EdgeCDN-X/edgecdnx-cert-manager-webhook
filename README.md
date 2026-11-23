@@ -1,11 +1,11 @@
 # EdgeCDN-X cert-manager webhook
 
-DNS01 solver for the EdgeCDN-X API. Solver name: `edgecdnx`; default API group:
+DNS01 solver for the EdgeCDN-X API or local controller CRDs. Solver name: `edgecdnx`; default API group:
 `acme.edgecdnx.com`.
 
-Zone discovery and DNS record operations use
+In API mode, Zone discovery and DNS record operations use
 [`edgecdnx-sdk-go`](https://github.com/EdgeCDN-X/edgecdnx-sdk-go) v0.1.1.
-The webhook retains its transport timeout, redirect rejection, response-size
+API mode retains its transport timeout, redirect rejection, response-size
 limit, and redacted debug logging. SDK conditional deletion preserves the
 resource-version preconditions used for concurrent challenge cleanup.
 
@@ -14,7 +14,7 @@ overwriting existing values, and removes only the completed challenge's value.
 Repeated Present/CleanUp calls are idempotent. Optimistic version checks and
 bounded retries protect simultaneous challenges, including across replicas.
 
-## Requirements
+## API mode (default)
 
 - cert-manager installed in the cluster.
 - An EdgeCDN-X Project and an existing Zone serving authoritative DNS.
@@ -42,10 +42,10 @@ kubectl -n cert-manager create secret generic edgecdnx-api-key \
 ```
 
 Build and publish the webhook image to your registry, then install the
-[Helm chart](deploy/example-webhook):
+[Helm chart](deploy/edgecdnx-cert-manager-webhook):
 
 ```sh
-helm upgrade --install edgecdnx-webhook deploy/example-webhook \
+helm upgrade --install edgecdnx-webhook deploy/edgecdnx-cert-manager-webhook \
   --namespace cert-manager \
   --set image.repository=YOUR_REGISTRY/edgecdnx-cert-manager-webhook \
   --set image.tag=YOUR_TAG \
@@ -88,6 +88,38 @@ the next request without restarting the webhook. The API's zone list is
 eventually consistent, so changes may still take time to appear there.
 New TXT records use a fixed TTL of 60 seconds.
 
+## CRD mode
+
+When the webhook runs in the same cluster as the EdgeCDN-X controller, set
+`edgecdnx.webhookMode=CRD` (or `--webhook-mode=CRD` outside Helm). API mode
+remains the default (`--webhook-mode=API`). CRD mode requires cert-manager,
+the EdgeCDN-X controller and its `infrastructure.edgecdnx.com/v1alpha1` CRDs,
+and an existing Zone with a Project reference. It does not use or require
+`EDGECDNX_PROJECT_ID`, `EDGECDNX_API_URL`, or `EDGECDNX_API_KEY`.
+
+```sh
+helm upgrade --install edgecdnx-webhook deploy/edgecdnx-cert-manager-webhook \
+  --namespace cert-manager \
+  --set image.repository=YOUR_REGISTRY/edgecdnx-cert-manager-webhook \
+  --set image.tag=YOUR_TAG \
+  --set edgecdnx.webhookMode=CRD
+```
+
+For each request, the solver lists Zones across all namespaces, selects the
+most-specific Zone covering the resolved challenge name, and fails if that
+best match is ambiguous. It creates a Simple TXT DNSEndpoint in that Zone's
+namespace with its Project and Zone references. The 60-second TTL, value
+preservation, idempotency, and optimistic retries match API mode. The controller
+still needs to reconcile the endpoint and publish authoritative DNS; successful
+creation does not itself guarantee propagation.
+
+**Trust boundary:** CRD mode grants the webhook cluster-wide Zone list and
+DNSEndpoint get/create/update/delete access. Any issuer authorized to use this
+webhook can request records in any matching Zone, regardless of the issuer's
+namespace or Project. Restrict issuer creation and webhook access accordingly;
+do not use this deployment to enforce tenant isolation. The Helm chart grants
+these permissions only in CRD mode.
+
 ## Issuer
 
 Merge this solver into an existing Issuer/ClusterIssuer's `spec.acme.solvers`:
@@ -101,10 +133,10 @@ solvers:
 ```
 
 No per-Issuer `config` is needed or supported. Remove old `projectID`, `zoneID`,
-and `recordTTL` config fields and set the Project on the deployment instead.
+and `recordTTL` config fields; in API mode, set the Project on the deployment instead.
 DNS names come from cert-manager's resolved challenge, including
 CNAME delegation (configure cert-manager's `cnameStrategy: Follow` if needed).
-The resolved DNS name must be covered by one of the fetched Project zones.
+The resolved DNS name must be covered by an available Zone.
 
 ## Tests
 
@@ -115,7 +147,9 @@ go vet .
 
 Unit tests use the actual solver against an HTTP API fixture with version
 preconditions: lifecycle, idempotency, concurrent challenges, conflict retries,
-configuration errors, authentication errors and redirects.
+configuration errors, authentication errors and redirects. CRD tests use a fake
+Kubernetes client to exercise Zone selection, resource references and lifecycle,
+including conflict retries.
 
 To run an opt-in lifecycle smoke test against the locally running API, export
 the key from a protected file rather than putting it in shell history:

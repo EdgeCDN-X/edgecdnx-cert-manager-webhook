@@ -17,6 +17,8 @@ replicaCount: 1
 logLevel: 2
 
 edgecdnx:
+  # CRD mode needs a compatible webhook image and grants cluster-wide DNS access.
+  webhookMode: API
   projectID: ""
   apiURL: https://api.edgecdnx.com
   apiKeySecretRef:
